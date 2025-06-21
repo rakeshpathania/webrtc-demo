@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Live Support Session</title>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+        body { 
+            font-family: Arial, sans-serif; 
+            margin: 0; 
+            padding: 20px; 
+            background: #f5f5f5;
+            text-align: center;
+        }
+        .container { 
+            max-width: 400px; 
+            margin: 0 auto; 
+            background: white; 
+            padding: 20px; 
+            border-radius: 8px; 
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        button { 
+            background: #28a745; 
+            color: white; 
+            padding: 15px 30px; 
+            border: none; 
+            border-radius: 4px; 
+            cursor: pointer; 
+            font-size: 16px;
+            width: 100%;
+            margin: 10px 0;
+        }
+        button:hover { background: #218838; }
+        button:disabled { background: #ccc; cursor: not-allowed; }
+        .status { 
+            padding: 15px; 
+            border-radius: 4px; 
+            margin: 15px 0; 
+            font-weight: bold;
+        }
+        .waiting { background: #fff3cd; color: #856404; }
+        .connected { background: #d4edda; color: #155724; }
+        .error { background: #f8d7da; color: #721c24; }
+        video { 
+            width: 100%; 
+            max-width: 300px; 
+            border: 2px solid #ddd; 
+            border-radius: 8px; 
+            margin: 15px 0;
+        }
+        h1 { color: #333; margin-bottom: 20px; }
+        p { color: #666; line-height: 1.5; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Live Support Session</h1>
+        
+        <div id="initialScreen">
+            <p>You're about to join a live support session. We'll need access to your camera and screen to assist you.</p>
+            <button onclick="startSession()">Start with Camera</button>
+            <button onclick="startScreenShare()">Start with Screen Share</button>
+        </div>
+
+        <div id="sessionScreen" style="display: none;">
+            <div id="status" class="status waiting">Connecting to support agent...</div>
+            <video id="localVideo" autoplay muted playsinline></video>
+            <p><small>Your video is being shared with the support agent</small></p>
+        </div>
+    </div>
+
+    <script src="/socket.io/socket.io.js"></script>
+    <script>
+        const socket = io();
+        const sessionId = window.location.pathname.split('/').pop();
+        let localStream = null;
+        let peerConnection = null;
+
+        socket.on('connect', () => {
+            console.log('Customer connected to server with ID:', socket.id);
+        });
+
+        socket.on('disconnect', () => {
+            console.log('Customer disconnected from server');
+        });
+
+        async function startSession() {
+            try {
+                document.getElementById('status').textContent = 'Requesting camera access...';
+                
+                localStream = await navigator.mediaDevices.getUserMedia({ 
+                    video: { facingMode: 'user' }, 
+                    audio: false 
+                });
+                
+                initializeSession();
+            } catch (error) {
+                document.getElementById('status').className = 'status error';
+                document.getElementById('status').textContent = 'Camera access denied. Please refresh and allow camera access.';
+                console.error('Error accessing camera:', error);
+            }
+        }
+
+        async function startScreenShare() {
+            try {
+                document.getElementById('status').textContent = 'Requesting screen share access...';
+                
+                localStream = await navigator.mediaDevices.getDisplayMedia({ 
+                    video: true, 
+                    audio: false 
+                });
+                
+                initializeSession();
+            } catch (error) {
+                document.getElementById('status').className = 'status error';
+                document.getElementById('status').textContent = 'Screen share access denied. Please refresh and allow screen access.';
+                console.error('Error accessing screen:', error);
+            }
+        }
+
+        function initializeSession() {
+            console.log(localStream, "localStream");
+            document.getElementById('localVideo').srcObject = localStream;
+            document.getElementById('initialScreen').style.display = 'none';
+            document.getElementById('sessionScreen').style.display = 'block';
+            
+            socket.emit('join-session', sessionId);
+            console.log('Joined session:', sessionId);
+            setupWebRTC();
+            
+            document.getElementById('status').className = 'status connected';
+            document.getElementById('status').textContent = 'Connected to support agent';
+        }
+
+        function setupWebRTC() {
+            console.log('Setting up WebRTC...');
+            peerConnection = new RTCPeerConnection({
+                iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+            });
+
+            console.log('Adding tracks to peer connection...');
+            localStream.getTracks().forEach(track => {
+                console.log('Adding track:', track.kind);
+                peerConnection.addTrack(track, localStream);
+            });
+
+            peerConnection.onicecandidate = (event) => {
+                if (event.candidate) {
+                    socket.emit('webrtc-ice-candidate', {
+                        sessionId: sessionId,
+                        candidate: event.candidate
+                    });
+                }
+            };
+
+            peerConnection.onconnectionstatechange = () => {
+                console.log('Customer connection state:', peerConnection.connectionState);
+            };
+
+            console.log('WebRTC setup complete, creating offer in 2 seconds...');
+            setTimeout(createOffer, 2000);
+        }
+
+        async function createOffer() {
+            try {
+                console.log('Creating offer...');
+                const offer = await peerConnection.createOffer();
+                await peerConnection.setLocalDescription(offer);
+
+                console.log('Offer created, sending to agent');
+                console.log('Socket connected:', socket.connected);
+                console.log('Session ID:', sessionId);
+
+                socket.emit('webrtc-offer', {
+                    sessionId: sessionId,
+                    offer: offer
+                });
+                console.log('Offer emitted successfully');
+            } catch (error) {
+                console.error('Error creating offer:', error);
+            }
+        }
+
+        socket.on('webrtc-answer', async (data) => {
+            if (data.sessionId === sessionId) {
+                console.log('Received answer from agent');
+                await peerConnection.setRemoteDescription(data.answer);
+            }
+        });
+
+        socket.on('webrtc-ice-candidate', (data) => {
+            if (data.sessionId === sessionId) {
+                peerConnection.addIceCandidate(data.candidate);
+            }
+        });
+
+        // Handle page unload
+        window.addEventListener('beforeunload', () => {
+            if (localStream) {
+                localStream.getTracks().forEach(track => track.stop());
+            }
+        });
+    </script>
+</body>
+</html>

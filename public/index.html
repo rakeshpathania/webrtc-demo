@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Live Support Agent</title>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+        body { font-family: Arial, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; }
+        .form-group { margin: 15px 0; }
+        label { display: block; margin-bottom: 5px; font-weight: bold; }
+        input { width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px; }
+        button { background: #007bff; color: white; padding: 10px 20px; border: none; border-radius: 4px; cursor: pointer; }
+        button:hover { background: #0056b3; }
+        button:disabled { background: #ccc; cursor: not-allowed; }
+        .session-info { background: #f8f9fa; padding: 15px; border-radius: 4px; margin: 15px 0; }
+        .video-container { margin: 20px 0; }
+        video { width: 100%; max-width: 400px; border: 1px solid #ddd; border-radius: 4px; }
+        .status { padding: 10px; border-radius: 4px; margin: 10px 0; }
+        .waiting { background: #fff3cd; color: #856404; }
+        .connected { background: #d4edda; color: #155724; }
+    </style>
+</head>
+<body>
+    <h1>Live Support Agent Interface</h1>
+    
+    <div id="sessionForm">
+        <div class="form-group">
+            <label for="customerName">Customer Name:</label>
+            <input type="text" id="customerName" required>
+        </div>
+        <div class="form-group">
+            <label for="customerPhone">Customer Phone:</label>
+            <input type="tel" id="customerPhone" required>
+        </div>
+        <button onclick="createSession()">Send Session Link</button>
+    </div>
+
+    <div id="sessionInfo" style="display: none;">
+        <div class="session-info">
+            <h3>Session Created</h3>
+            <p><strong>Customer:</strong> <span id="displayName"></span></p>
+            <p><strong>Phone:</strong> <span id="displayPhone"></span></p>
+            <p><strong>Session URL:</strong> <a id="sessionLink" target="_blank"></a></p>
+            <button onclick="copyLink()">Copy Link</button>
+        </div>
+        <div id="status" class="status waiting">Waiting for customer to join...</div>
+        <div class="video-container">
+            <video id="customerVideo" autoplay muted></video>
+            <br>
+            <button onclick="captureScreenshot()" id="screenshotBtn" style="display: none;">Capture Screenshot</button>
+        </div>
+    </div>
+
+    <script src="/socket.io/socket.io.js"></script>
+    <script>
+        const socket = io();
+        let currentSessionId = null;
+
+        socket.emit('join-as-agent', { name: 'Demo Agent' });
+
+        async function createSession() {
+            const customerName = document.getElementById('customerName').value;
+            const customerPhone = document.getElementById('customerPhone').value;
+            
+            if (!customerName || !customerPhone) {
+                alert('Please fill in all fields');
+                return;
+            }
+
+            try {
+                const response = await fetch('/api/create-session', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ customerName, customerPhone })
+                });
+                
+                const data = await response.json();
+                currentSessionId = data.sessionId;
+                
+                document.getElementById('displayName').textContent = customerName;
+                document.getElementById('displayPhone').textContent = customerPhone;
+                document.getElementById('sessionLink').href = data.sessionUrl;
+                document.getElementById('sessionLink').textContent = data.sessionUrl;
+                
+                document.getElementById('sessionForm').style.display = 'none';
+                document.getElementById('sessionInfo').style.display = 'block';
+                
+                console.log('SMS would be sent to:', customerPhone, 'with link:', data.sessionUrl);
+            } catch (error) {
+                alert('Error creating session: ' + error.message);
+            }
+        }
+
+        function copyLink() {
+            const link = document.getElementById('sessionLink').href;
+            navigator.clipboard.writeText(link).then(() => {
+                alert('Link copied to clipboard!');
+            });
+        }
+
+        socket.on('customer-joined', (data) => {
+            if (data.sessionId === currentSessionId) {
+                document.getElementById('status').className = 'status connected';
+                document.getElementById('status').textContent = 'Customer connected - Setting up video...';
+            }
+        });
+
+        let peerConnection = null;
+
+        socket.on('webrtc-offer', async (data) => {
+            if (data.sessionId === currentSessionId) {
+                peerConnection = new RTCPeerConnection({
+                    iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+                });
+
+                peerConnection.ontrack = (event) => {
+                    console.log('Received video track');
+                    document.getElementById('customerVideo').srcObject = event.streams[0];
+                    document.getElementById('status').textContent = 'Live video stream active';
+                    document.getElementById('screenshotBtn').style.display = 'inline-block';
+                };
+
+                peerConnection.onicecandidate = (event) => {
+                    if (event.candidate) {
+                        socket.emit('webrtc-ice-candidate', {
+                            sessionId: currentSessionId,
+                            candidate: event.candidate
+                        });
+                    }
+                };
+
+                peerConnection.onconnectionstatechange = () => {
+                    console.log('Connection state:', peerConnection.connectionState);
+                };
+
+                await peerConnection.setRemoteDescription(data.offer);
+                const answer = await peerConnection.createAnswer();
+                await peerConnection.setLocalDescription(answer);
+
+                socket.emit('webrtc-answer', {
+                    sessionId: currentSessionId,
+                    answer: answer
+                });
+            }
+        });
+
+        socket.on('webrtc-ice-candidate', (data) => {
+            if (data.sessionId === currentSessionId && peerConnection) {
+                peerConnection.addIceCandidate(data.candidate);
+            }
+        });
+
+        function captureScreenshot() {
+            const video = document.getElementById('customerVideo');
+            const canvas = document.createElement('canvas');
+            canvas.width = video.videoWidth;
+            canvas.height = video.videoHeight;
+            const ctx = canvas.getContext('2d');
+            ctx.drawImage(video, 0, 0);
+            
+            const link = document.createElement('a');
+            link.download = `screenshot-${Date.now()}.png`;
+            link.href = canvas.toDataURL();
+            link.click();
+        }
+    </script>
+</body>
+</html>
